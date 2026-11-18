@@ -117,5 +117,3 @@ Invoke-RestMethod http://localhost:8084/api/orders?userId=user-1
 
 Invoke-RestMethod -Method Post -Uri http://localhost:8084/api/orders -ContentType "application/json" -Body '{"userId":"user-1","customer":{"name":"Test","address":"1 rue A","city":"Casablanca"},"items":[{"productId":2,"quantity":1}]}'
 ```
-
-`mock_services.py` simule Catalog, Inventory et Shipping pour tester Order seul : `python mock_services.py`.
