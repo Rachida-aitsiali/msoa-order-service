@@ -15,6 +15,9 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orders.db")
 # STANDALONE=1 : le service marche seul (prix = 0, pas d'appel aux autres services)
 # STANDALONE=0 : appelle Catalog, Inventory et Shipping
 STANDALONE = os.getenv("STANDALONE", "1") == "1"
+# USE_GRPC=1 : verification du stock par gRPC (Lab 4). USE_GRPC=0 : sans gRPC
+USE_GRPC = os.getenv("USE_GRPC", "1") == "1"
+
 CATALOG_URL = os.getenv("CATALOG_URL", "http://localhost:8082")
 INVENTORY_URL = os.getenv("INVENTORY_URL", "http://localhost:8083")
 SHIPPING_URL = os.getenv("SHIPPING_URL", "http://localhost:8086")
@@ -70,7 +73,7 @@ def load_order(conn, order_id):
     }
 
 
-# ---- Appels vers les autres services (contrats lus dans le front) ----
+# ---- Appels vers les autres services ----
 def _error_message(r, default):
     try:
         return r.json().get("message", default)
@@ -79,7 +82,7 @@ def _error_message(r, default):
 
 
 def fetch_product(product_id):
-    """Catalog : GET /products/{id}  (sans /api)"""
+    """Catalog : GET /products/{id}  (REST, sans /api)"""
     if STANDALONE:
         return {"name": f"Product {product_id}", "price": 0}
     r = requests.get(f"{CATALOG_URL}/products/{product_id}", timeout=5)
@@ -90,8 +93,19 @@ def fetch_product(product_id):
     return {"name": d["name"], "price": d["price"]}
 
 
+def check_stock(items):
+    """Inventory : verification de disponibilite par gRPC (Lab 4)."""
+    if STANDALONE or not USE_GRPC:
+        return
+    import inventory_grpc  # import ici : le mode autonome marche sans gRPC
+    for it in items:
+        available, _ = inventory_grpc.check_availability(it["productId"], it["quantity"])
+        if not available:
+            raise ValueError(f"Insufficient stock for product {it['productId']}.")
+
+
 def reserve_stock(items):
-    """Inventory : POST /api/inventory/reserve"""
+    """Inventory : POST /api/inventory/reserve (REST)"""
     if STANDALONE:
         return
     r = requests.post(f"{INVENTORY_URL}/api/inventory/reserve", json={"items": items}, timeout=5)
@@ -101,7 +115,7 @@ def reserve_stock(items):
 
 
 def release_stock(items):
-    """Inventory : POST /api/inventory/release (compensation)"""
+    """Inventory : POST /api/inventory/release (REST, compensation)"""
     if STANDALONE:
         return
     r = requests.post(f"{INVENTORY_URL}/api/inventory/release", json={"items": items}, timeout=5)
@@ -109,7 +123,7 @@ def release_stock(items):
 
 
 def get_shipment_status(order_id):
-    """Shipping : GET /api/shipments/order/{orderId}"""
+    """Shipping : GET /api/shipments/order/{orderId} (REST)"""
     if STANDALONE:
         return None
     r = requests.get(f"{SHIPPING_URL}/api/shipments/order/{order_id}", timeout=5)
@@ -122,7 +136,12 @@ def get_shipment_status(order_id):
 # ---- Routes ----
 @app.get("/health")
 def health():
-    return jsonify({"status": "UP", "service": "order", "standalone": STANDALONE})
+    return jsonify({
+        "status": "UP",
+        "service": "order",
+        "standalone": STANDALONE,
+        "grpc": USE_GRPC,
+    })
 
 
 @app.get("/api/orders")
@@ -179,13 +198,15 @@ def create_order():
     except requests.RequestException:
         return error("Catalog service unavailable.", 503)
 
-    # 2) Reservation du stock (Inventory) : si refus, aucune commande n'est creee
+    # 2) Disponibilite par gRPC, puis reservation du stock (Inventory)
+    #    Si refus, aucune commande n'est creee
     stock_items = [{"productId": i["productId"], "quantity": i["quantity"]} for i in items]
     try:
+        check_stock(stock_items)
         reserve_stock(stock_items)
     except ValueError as e:
         return error(str(e), 409)
-    except requests.RequestException:
+    except (requests.RequestException, ConnectionError):
         return error("Inventory service unavailable.", 503)
 
     # 3) Enregistrement de la commande
